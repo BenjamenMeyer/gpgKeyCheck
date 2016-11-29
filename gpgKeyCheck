@@ -1,0 +1,188 @@
+#!/bin/bash
+
+# Script Variables
+GPG_KEY_LOCAL_FILE=""
+GPG_KEY_URL=""
+GPG_HOME_DIR=""
+
+# Errors
+EXIT_ERROR_SUCCESS=0
+EXIT_ERROR_MISSING_PARAMETER=1
+EXIT_ERROR_INVALID_PARAMETER_SET=2
+EXIT_ERROR_UNABLE_TO_SANDBOX=3
+EXIT_ERROR_KEY_DOWNLOAD=4
+
+# Usage Output
+PROGRAM="${0}"
+ARG_KEY="--key"
+ARG_URL="--url"
+function printHelp()
+	{
+	local PRINT_HELP_EXIT_CODE=${1}
+
+	echo "Usage:"
+	echo "	${PROGRAM} ${ARG_URL} <url to GPG key>"
+	echo "	${PROGRAM} ${ARG_KEY} <path to GPG key>"
+	echo
+
+	exit ${PRINT_HELP_EXIT_CODE}
+	}
+
+# Parse the arguments
+for ARG in $@
+do
+	if [ -v ARG_VALUE ]; then
+		case "${ARG_VALUE}" in
+			${ARG_KEY})
+				GPG_KEY_LOCAL_FILE="${ARG}"
+				;;
+
+			${ARG_URL})
+				GPG_KEY_URL="${ARG}"
+				;;
+
+			*)
+				printHelp ${EXIT_ERROR_SUCCESS}
+				;;
+		esac
+		unset ARG_VALUE
+	else
+		case "${ARG}" in
+			${ARG_KEY})
+				ARG_VALUE="${ARG_KEY}"
+				;;
+
+			${ARG_URL})
+				ARG_VALUE="${ARG_URL}"
+				;;
+
+			*)
+				printHelp ${EXIT_ERROR_SUCCESS}
+				;;
+		esac
+	fi
+done
+
+function validateHomeDirectory()
+	{
+	if [ -z "${GPG_HOME_DIR}" ]; then
+		echo "Unable to make or cleanup temp home directory"
+		exit ${EXIT_ERROR_UNABLE_TO_SANDBOX}
+	elif [ "${GPG_HOME_DIR}" == "." -o "${GPG_HOME_DIR}" == `pwd` ]; then
+		echo "Temp home directory is current directory. Invalid state"
+		exit ${EXIT_ERROR_UNABLE_TO_SANDBOX}
+	elif [ "${GPG_HOME_DIR}" == "/" ]; then
+		echo "Temp home directory is root directory. Invalid state"
+		exit ${EXIT_ERROR_UNABLE_TO_SANDBOX}
+	elif [ "${GPG_HOME_DIR}" == "${HOME}" ]; then
+		echo "Temp home directory is home directory. Invalid state"
+		exit ${EXIT_ERROR_UNABLE_TO_SANDBOX}
+	fi
+	}
+
+function createHomeDirectory()
+	{
+	GPG_HOME_DIR=`mktemp -d`
+	# validate that the GPG home directory is safe to use
+	validateHomeDirectory
+	return ${EXIT_ERROR_SUCCESS}
+	}
+
+function cleanupHomeDirectory()
+	{
+	# validate that the GPG home directory is safe to _remove_
+	validateHomeDirectory
+	rm -Rf "${GPG_HOME_DIR}"
+	return $?
+	}
+
+function downloadFile()
+	{
+	local KEY_URL="${1}"
+	local KEY_FILE="${2}"
+
+	wget -O "${KEY_FILE}" "${KEY_URL}"
+	local -i WGET_RETVAL=$?
+	case ${WGET_RETVAL} in
+		0)
+			return ${EXIT_ERROR_SUCCESS}
+			;;
+		*)
+			echo "wget error code: ${WGET_RETVAL}"
+			return ${EXIT_ERROR_KEY_DOWNLOAD}
+			;;
+	esac
+	}
+
+function validateGpgKey()
+	{
+	local KEY_FILE="${1}"
+
+	createHomeDirectory
+	local -i CHD_RETVAL=$?
+	if [ ${CHD_RETVAL} -eq 0 ]; then
+		GPG="gpg --homedir ${GPG_HOME_DIR}"
+		
+		echo "Create GPG sandbox environment"
+		${GPG} -k
+		echo "Import the GPG key"
+		${GPG} --import "${KEY_FILE}"
+		echo "Check the key"
+		${GPG} -k
+
+		cleanupHomeDirectory
+		return ${EXIT_ERROR_SUCCESS}
+	else
+		return ${CHD_REVAL}
+	fi
+	}
+
+# Wrapper around validateGpgKey that simply downloads the GPG key
+# first to a temp file so that validateGpgKey can be called on the
+# temp file
+function downloadAndValidateGpgKey()
+	{
+	local KEY_URL="${1}"
+	local KEY_FILE=`mktemp`
+
+	downloadFile "${KEY_URL}" "${KEY_FILE}"
+	local DOWNLOAD_RETVAL=$?
+	if [ ${DOWNLOAD_RETVAL} -eq 0 ]; then
+		# validate the file using the temp file
+		validateGpgKey "${KEY_FILE}"
+		local VALIDATE_GPG_KEY_RETVAL=$?
+
+		# it's a temp file so it doesn't matter but it's good to
+		# try to cleanup any way; if it fails, just ignore the result
+		rm ${KEY_FILE}
+
+		# return the validation error code
+		return ${VALIDATE_GPG_KEY_RETVAL}
+
+	else
+		return ${DOWNLOAD_RETVAL}
+	fi
+	}
+
+# 4 potential states:
+# Neither variable is set (bad)
+if [ -z "${GPG_KEY_LOCAL_FILE}" -a -z "${GPG_KEY_URL}" ]; then
+	echo "Missing parameter"
+	printHelp ${EXIT_ERROR_MISSING_PARAMETER}
+
+# Both variables are set (bad)
+elif [ -n "${GPG_KEY_LOCAL_FILE}" -a -n "${GPG_KEY_URL}" ]; then
+	echo "Only URL or file may be specified. Not both"
+	printHelp ${EXIT_ERROR_INVALID_PARAMETER_SET}
+
+# only local file is set (good)
+elif [ -n "${GPG_KEY_LOCAL_FILE}" ]; then
+	validateGpgKey "${GPG_KEY_LOCAL_FILE}"
+	exit $?
+
+
+# only url is set (good)
+elif [  -n "${GPG_KEY_URL}" ]; then
+	downloadAndValidateGpgKey "${GPG_KEY_URL}"
+	exit $?
+fi
